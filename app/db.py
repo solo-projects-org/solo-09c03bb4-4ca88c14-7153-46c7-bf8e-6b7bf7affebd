@@ -1,9 +1,10 @@
 """SQLite storage layer.
 
-Three tables:
+Tables:
   trades      -- current state per (symbol, trade_no), keyed by revision
   minute_bars -- current materialized minute bar per (symbol, minute)
   journal     -- append-only change log; its seq is the cursor risk control uses
+  meta        -- one-off upgrade markers (e.g. sort-key backfill done)
 
 WAL + synchronous=FULL: a committed transaction survives a process restart or
 power loss, so a cursor a client has already seen can never be "uncommitted".
@@ -23,7 +24,6 @@ CREATE TABLE IF NOT EXISTS trades (
     price_cents       INTEGER,
     qty               INTEGER,
     cancelled         INTEGER NOT NULL DEFAULT 0,
-    trade_no_num      INTEGER,
     PRIMARY KEY (symbol, trade_no)
 );
 
@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS journal (
     minute_start_utc_ms INTEGER NOT NULL,
     change_type         TEXT    NOT NULL CHECK (change_type IN ('upsert', 'delete')),
     bar_json            TEXT
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_journal_symbol_seq ON journal (symbol, seq);
@@ -70,5 +75,10 @@ def init_db(db_path: str) -> None:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = FULL")
         conn.executescript(SCHEMA)
+        # One-off repair of bars ordered by the legacy int64-only sort key.
+        # Idempotent: a meta marker makes later restarts a no-op.
+        from . import logic
+
+        logic.upgrade_sort_key(conn)
     finally:
         conn.close()
